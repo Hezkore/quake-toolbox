@@ -1,0 +1,1221 @@
+Namespace myapp
+
+#Import "<std>"
+#Import "<mojo>"
+#Import "<mojo3d>"
+
+#Import "assets/"
+
+Using std..
+Using mojo..
+Using mojo3d..
+
+'http://www.gamers.org/dEngine/quake/spec/quake-spec34/qkspec_4.htm
+
+Class Bsp Extends BspReader
+	Const SCALE:Float=0.1
+	
+	Field data:DataBuffer
+	Field dataOffset:UInt
+	
+	Field header:BspHeader
+	Field mipTexHeader:BspMipHeader
+	Field entities:=New List<BspEntity>
+	Field planes:BspPlane[]
+	Field vertices:BspVertex[]
+	Field surfaces:BspSurface[]
+	Field faces:BspFace[]
+	Field edges:BspEdge[]
+	Field ledges:BspLedge[]
+	Field models:BspModel[]
+	Field mipTexs:BspMipTex[]
+	Field palette:=New BspPalette
+	Field skyTexture:Texture
+	
+	Field lastMipTexs:=New Stack<BspMipTex>
+	
+	Function Load:Bsp(path:String)
+		Local nB:=New Bsp
+		nB.parentBsp=nB
+		
+		nB.data=DataBuffer.Load(path)
+		If Not nB.data Then
+			Print "Unable to load Bsp: ~q"+path+"~q"
+			Return Null
+		Endif
+		
+		nB.Process()
+		
+		Return nB
+	End
+	
+	Method Process()
+		Local num:Int
+		Local i:Int
+		
+		skyTexture=Null
+		
+		'Get header and entry data
+		Self.header=New BspHeader(Self)
+		
+		'Process entities
+		Self.header.entities.JumpTo()
+		Local entStr:String=ReadString(Self.header.entities.size) 'Get entire string
+		Local entSplit:=entStr.Split("{") 'Split each entity
+		For i=0 Until entSplit.Length 'Create a new entity from each split
+			Self.entities.AddLast(New BspEntity(entSplit[i]))
+		Next
+		
+		Print "Entities: "+Self.entities.Count()
+		
+		'Process planes
+		num=Self.header.planes.Count(BspPlane.Size())
+		Print "Planes: "+num
+		Self.planes=New BspPlane[num]
+		Self.header.planes.JumpTo()
+		For i=0 Until num
+			Self.planes[i]=New BspPlane(Self)
+		Next
+		
+		'Process vertices
+		num=Self.header.vertices.Count(BspVertex.Size())
+		Print "Vertices: "+num
+		Self.vertices=New BspVertex[num]
+		Self.header.vertices.JumpTo()
+		For i=0 Until num
+			Self.vertices[i]=New BspVertex(Self)
+		Next
+		
+		'Process surface info
+		num=Self.header.texInfo.Count(BspSurface.Size())
+		Print "Surfaces: "+num
+		Self.surfaces=New BspSurface[num]
+		Self.header.texInfo.JumpTo()
+		For i=0 Until num
+			Self.surfaces[i]=New BspSurface(Self)
+		Next
+		
+		'Process mipmap headers
+		Self.header.mipTex.JumpTo()
+		Self.mipTexHeader=New BspMipHeader(Self)
+		num=Self.mipTexHeader.Count
+		Print "MipTexs: "+num
+		
+		'Process miptexs from mipmap header
+		num=Self.mipTexHeader.Count
+		Self.mipTexs=New BspMipTex[num]
+		For i=0 Until num
+			Self.mipTexs[i]=New BspMipTex(Self,i)
+			Self.mipTexs[i].Generate()
+		Next
+		
+		'Process faces
+		num=Self.header.faces.Count(BspFace.Size())
+		Print "Faces: "+num
+		Self.faces=New BspFace[num]
+		Self.header.faces.JumpTo()
+		For i=0 Until num
+			Self.faces[i]=New BspFace(Self)
+		Next
+		
+		'Process edges
+		num=Self.header.edges.Count(BspEdge.Size())
+		Print "Edges: "+num
+		Self.edges=New BspEdge[num]
+		Self.header.edges.JumpTo()
+		For i = 0 Until num
+			Self.edges[i]=New BspEdge(Self)
+		Next
+		
+		'Process ledges
+		num=Self.header.ledges.Count(BspLedge.Size())
+		Print "Ledges: "+num
+		Self.ledges=New BspLedge[num]
+		Self.header.ledges.JumpTo()
+		For i=0 Until num
+			Self.ledges[i]=New BspLedge(Self)
+		Next
+		
+		'Process models
+		num=Self.header.models.Count(BspModel.Size())
+		Print "Models: "+num
+		Self.models = New BspModel[num]
+		Self.header.models.JumpTo()
+		For i=0 Until num
+			Self.models[i]=New BspModel(Self)
+		Next
+	End
+	
+	Property Sky:Texture()
+		Return skyTexture
+	End
+End
+
+Class BspMipTex Extends BspReader
+	Field name:String
+	Field width:Int
+	Field height:Int
+	Field offset1:Int
+	Field offset2:Int
+	Field offset4:Int
+	Field offset8:Int
+	
+	Field id:Int
+	Field pix:Pixmap
+	Field pixels:UByte[,]
+	Field animStep:Int
+	Field texture:Texture
+	Field material:Material
+	
+	Field masked:Bool
+	
+	Method Generate()
+		JumpTo()
+		If width<=1 And height<=1 Then
+			Print "Invalid textures size"
+			Return
+		Endif
+		
+		'Does this texture use a mask?
+		If name.StartsWith("{") Then masked=True
+		
+		Local pal:=parentBsp.palette
+		Local pixel:UByte
+		pix=New Pixmap(width,height)
+		pixels=New UByte[width,height]
+		
+		For Local y:Int=0 Until height
+		For Local x:Int=0 Until width
+			pixel=ReadUByte()
+			pixels[x,y]=pixel
+			
+			If masked Then
+				If pixel>=255 Then 
+					pix.SetPixelARGB(x,y,0)
+				Else
+					pix.SetPixelARGB(x,y,pal.GetARGB(pixel))
+				Endif
+			Else
+				pix.SetPixelARGB(x,y,pal.GetARGB(pixel))
+			Endif
+			
+		Next
+		Next
+		
+		'Just add a normal texture
+		If Not texture Then texture=New Texture(pix,TextureFlags.WrapST)
+		
+		'Enable liquids
+		If name.StartsWith("*") Then
+			Local mat:=New PbrMaterial(Color.Black,1,1)
+			mat.Shader=Shader.GetShader("q1_water")
+			mat.EmissiveTexture=texture
+			mat.EmissiveFactor=Color.White
+			material=mat
+		Endif
+		
+		'Sky
+		If name.StartsWith("sky") Then
+			Local mat:=New PbrMaterial(Color.Black,1,1)
+			mat.Shader=Shader.GetShader("q1_sky")
+			mat.EmissiveTexture=texture
+			mat.EmissiveFactor=Color.White
+			material=mat
+		Endif
+		
+		'Just add a normal Quake material
+		If Not material Then
+			Local mat:=New PbrMaterial(Color.Black,1,1)
+			mat.EmissiveTexture=texture
+			mat.EmissiveFactor=Color.White
+			material=mat
+		Endif
+		
+		'Debug save
+		'pix.Save("C:\Users\vital\Desktop\output\"+name+".png")
+	End
+	
+	Method New(parent:Bsp,id:Int)
+		Self.parentBsp=parent
+		Self.id=id
+		
+		JumpToHeader()
+		
+		name=ReadString(16).Split(String.FromChar(0))[0]
+		width=ReadInt()
+		height=ReadInt()
+		offset1=ReadInt()
+		offset2=ReadInt()
+		offset4=ReadInt()
+		offset8=ReadInt()
+	End
+	
+	Method JumpTo()
+		parentBsp.dataOffset=parentBsp.header.mipTex.position
+		parentBsp.dataOffset+=parentBsp.mipTexHeader.offset[id]
+		parentBsp.dataOffset+=parentBsp.mipTexs[id].offset1
+	End
+	
+	Method JumpToHeader()
+		parentBsp.dataOffset=parentBsp.header.mipTex.position
+		parentBsp.dataOffset+=parentBsp.mipTexHeader.offset[id]
+	End
+	
+	Function Size:Int()
+		Return 16+(4*6)
+	End
+End
+
+Class BspMipHeader Extends BspReader
+	Field numTex:Int
+	Field offset:Int[]
+	
+	Field count:Int
+	
+	Property Count:Int()
+		Return count
+	End
+	
+	Method New(parent:Bsp)
+		Self.parentBsp=parent
+		
+		numTex=ReadInt()
+		offset=New Int[numTex]
+		For Local i:Int=0 Until numTex
+			offset[i]=ReadInt()
+			count+=1
+		Next
+	End
+End
+
+
+Class BspSurface Extends BspReader
+	Field vectorS:Vec3f
+	Field distS:Float
+	Field vectorT:Vec3f
+	Field distT:Float
+	Field textureID:Int
+	Field animated:Int
+	
+	Method New(parent:Bsp)
+		Self.parentBsp=parent
+		
+		vectorS=ReadVec3f()
+		distS=ReadFloat()
+		vectorT=ReadVec3f()
+		distT=ReadFloat()
+		textureID=ReadInt()
+		animated=ReadInt()
+	End
+	
+	Function Size:Int()
+		Return (4*2)+(4*2)+((4*3)*2)
+	End
+End
+
+Class BspBox Extends BspReader
+	Field minimum:Vec3f
+	Field maximum:Vec3f
+	
+	Method New(parent:Bsp)
+		Self.parentBsp=parent
+		
+		minimum=ReadVec3f()
+		maximum=ReadVec3f()
+	End
+	
+	Function Size:Int()
+		Return (4*3)*2
+	End
+End
+
+Class BspModel Extends BspReader
+	Field box:BspBox
+	Field origin:Vec3f
+	Field node0:Int
+	Field node1:Int
+	Field node2:Int
+	Field node3:Int
+	Field numLeafs:Int
+	Field faceID:Int
+	Field faceNum:Int
+	
+	Method New(parent:Bsp)
+		Self.parentBsp=parent
+		
+		box=New BspBox(parent)
+		origin=ReadVec3f()
+		node0=ReadInt()
+		node1=ReadInt()
+		node2=ReadInt()
+		node3=ReadInt()
+		numLeafs=ReadInt()
+		faceID=ReadInt()
+		faceNum=ReadInt()
+	End
+	
+	Function Size:Int()
+		Return (4*7)+BspBox.Size()+(4*3)
+	End
+End
+
+
+Class BspLedge Extends BspReader
+	Field edge:Int
+	
+	Method New(parent:Bsp)
+		Self.parentBsp=parent
+		
+		edge=ReadInt()
+	End
+	
+	Function Size:Int()
+		Return 4
+	End
+End
+
+Class BspEdge Extends BspReader
+	Field vertex0:Short
+	Field vertex1:Short
+	
+	Method New(parent:Bsp)
+		Self.parentBsp=parent
+		
+		vertex0=ReadShort()
+		vertex1=ReadShort()
+	End
+	
+	Function Size:Int()
+		Return 2*2
+	End
+End
+
+Class BspFace Extends BspReader
+	Const LIGHT_PAD:Int = 1
+	
+	Field planeID:Short
+	
+	Field side:Short
+	Field ledgeID:Int
+	
+	Field ledgeNum:Short
+	Field texInfoID:Short
+	
+	Field typeLight:Byte
+	Field baseLight:Byte
+	Field light:=New Byte[2]
+	Field lightMap:Int
+	
+	Method New(parent:Bsp)
+		Self.parentBsp=parent
+		
+		planeID=ReadShort()
+		side=ReadShort()
+		ledgeID=ReadInt()
+		ledgeNum=ReadShort()
+		texInfoID=ReadShort()
+		typeLight=ReadByte()
+		baseLight=ReadByte()
+		light[0]=ReadByte()
+		light[1]=ReadByte()
+		lightMap=ReadInt()
+	End
+	
+	Function Size:Int()
+		Return (2*4)+(4*2)+4
+	End
+End
+
+Class BspVertex Extends BspReader
+	Field x:Double
+	Field y:Double
+	Field z:Double
+	
+	Method New(parent:Bsp)
+		Self.parentBsp=parent
+		
+		x=ReadFloat()
+		y=ReadFloat()
+		z=ReadFloat()
+	End
+	
+	Function Size:Int()
+		Return 4*3
+	End
+	
+	Method Dot:Double(v:Vec3f)
+		Local vec:=New Vec3f(x,y,z)
+		Return vec.Dot(v)
+	End
+End
+
+Class BspPlane Extends BspReader
+	Field normal:Vec3f
+	Field dist:Float
+	Field type:Int
+	
+	Method New(parent:Bsp)
+		Self.parentBsp=parent
+		Local tmpN:Vec3f=ReadVec3f()
+		normal.x=tmpN.y
+		normal.y=tmpN.z
+		normal.z=tmpN.x
+		dist=ReadFloat()
+		type=ReadInt()
+	End
+	
+	Function Size:Int()
+		Return 4+4+(4*3)
+	End
+End
+
+Class BspEntity
+	Field data:=New Map<String,String>
+	Field rawData:String
+	Field className:String
+	Field origin:Vec3<Int>
+	Field angle:Double
+	Field model:Int
+	
+	Property Angle:Double()
+		Return angle
+	End
+	
+	Property Radians:Double()
+		Return angle*(Pi/180.0)
+	End
+	
+	Method New(str:String)
+		'Construct from data string
+		data.Clear()
+		
+		'Clean up!
+		str=str.Replace("~r","").Replace("~n","").Trim()
+		If str.EndsWith("}") Then str=str.Slice(0,-1)
+		
+		'Read data
+		Local dataSplit:=str.Split("~q") 'Split from "
+		Local dataStep:Byte
+		Local lastKey:String
+		Local lastValue:String
+		Local vecSplit:String[]
+		
+		For Local i:Int=1 Until dataSplit.Length Step 2
+			Select dataStep
+				Case 0
+					'Key
+					lastKey=dataSplit[i].ToLower()
+					
+				Case 1
+					'Value
+					lastValue=dataSplit[i]
+					
+					'Process and quick access
+					Select lastKey
+						Case ""
+							Print "Empty key"
+							lastValue=Null
+						Case "classname"
+							Self.className=lastValue.ToLower()
+						Case "origin"
+							vecSplit=lastValue.Split(" ")
+							origin.X=-Int(vecSplit[1])
+							origin.Y=Int(vecSplit[2])
+							origin.Z=Int(vecSplit[0])
+						Case "angle"
+							angle=Int(lastValue)
+						Case "model"
+							If lastValue.StartsWith("*") Then
+								model=Int(lastValue.Slice(1))
+							Else
+								model=Int(lastValue)
+							Endif
+					End
+					
+					'Add to data map
+					If lastValue Then
+						data.Add(lastKey,lastValue)
+					Else
+						Print "Empty value: "+lastKey
+					Endif
+			End
+			dataStep~=1
+		Next
+		
+		'Store data
+		rawData=str
+	End
+	
+	Method GetVector:Int[](key:String)
+		If data.Contains(key) Then
+			Local split:=String(data.Get(key)).Split(" ")
+			Local vec:=New Int[split.Length]
+			
+			For Local i:Int = 0 Until vec.Length
+				vec[(vec.Length+i-1) Mod vec.Length]=Int(split[i])
+			Next
+			vec[0]=-vec[0]
+			
+			Return vec
+		Endif
+		
+		Return Null
+	End
+	
+End
+
+'Generic class for reading stuff
+Class BspReader
+	Field parentBsp:Bsp
+	
+	Method ReadString:String(count:Int)
+		If Not parentBsp Then RuntimeError("No parent");Return Null
+		parentBsp.dataOffset+=count
+		Return parentBsp.data.PeekString(parentBsp.dataOffset-count,count)
+	End
+	
+	Method ReadShort:Short()
+		If Not parentBsp Then RuntimeError("No parent");Return 0
+		parentBsp.dataOffset+=2
+		Return parentBsp.data.PeekShort(parentBsp.dataOffset-2)
+	End
+	
+	Method ReadUShort:UShort()
+		If Not parentBsp Then RuntimeError("No parent");Return 0
+		parentBsp.dataOffset+=2
+		Return parentBsp.data.PeekUShort(parentBsp.dataOffset-2)
+	End
+	
+	Method ReadUByte:UByte()
+		If Not parentBsp Then RuntimeError("No parent");Return 0
+		parentBsp.dataOffset+=1
+		Return parentBsp.data.PeekUByte(parentBsp.dataOffset-1)
+	End
+	
+	Method ReadByte:Byte()
+		If Not parentBsp Then RuntimeError("No parent");Return 0
+		parentBsp.dataOffset+=1
+		Return parentBsp.data.PeekByte(parentBsp.dataOffset-1)
+	End
+	
+	Method ReadInt:Int()
+		If Not parentBsp Then RuntimeError("No parent");Return 0
+		parentBsp.dataOffset+=4
+		Return parentBsp.data.PeekInt(parentBsp.dataOffset-4)
+	End
+	
+	Method ReadUInt:UInt()
+		If Not parentBsp Then RuntimeError("No parent");Return 0
+		parentBsp.dataOffset+=4
+		Return parentBsp.data.PeekUInt(parentBsp.dataOffset-4)
+	End
+	
+	Method ReadFloat:Float()
+		If Not parentBsp Then RuntimeError("No parent");Return 0
+		parentBsp.dataOffset+=4
+		Return parentBsp.data.PeekFloat(parentBsp.dataOffset-4)
+	End
+	
+	Method ReadVec3f:Vec3f()
+		Local nX:Float=ReadFloat()
+		Local nY:Float=ReadFloat()
+		Local nZ:Float=ReadFloat()
+		Return New Vec3f(nX,nY,nZ)
+	End
+End
+
+Class BspHeader Extends BspReader
+	Field version:Int
+	Field entities:BspEntry
+	Field planes:BspEntry
+	Field mipTex:BspEntry
+	Field vertices:BspEntry
+	Field visiList:BspEntry
+	Field nodes:BspEntry
+	Field texInfo:BspEntry
+	Field faces:BspEntry
+	Field lightMaps:BspEntry
+	Field clipNodes:BspEntry
+	Field leaves:BspEntry
+	Field lfaces:BspEntry
+	Field edges:BspEntry
+	Field ledges:BspEntry
+	Field models:BspEntry
+	
+	Method New(parent:Bsp)
+		parentBsp=parent
+		
+		'Get version
+		version=ReadInt()
+		If version="29" Then
+			Print "Bsp version: "+version+" (correct)"
+		Else
+			Print "Bsp version: "+version+" (incorrect)"
+		Endif
+		
+		'Read a bunch of entry data
+		entities=ReadEntry()
+		planes=ReadEntry()
+		mipTex=ReadEntry()
+		vertices=ReadEntry()
+		visiList=ReadEntry()
+		nodes=ReadEntry()
+		texInfo=ReadEntry()
+		faces=ReadEntry()
+		lightMaps=ReadEntry()
+		clipNodes=ReadEntry()
+		leaves=ReadEntry()
+		lfaces=ReadEntry()
+		edges=ReadEntry()
+		ledges=ReadEntry()
+		models=ReadEntry()
+	End
+	
+	Method ReadEntry:BspEntry()
+		Return New BspEntry(parentBsp)
+	End
+End
+
+Class BspEntry Extends BspReader
+	Field position:Int 'Position in data buffer
+	Field size:Int 'Total size of entryMethod 
+	
+	Method New(parent:Bsp)
+		parentBsp=parent
+		position=ReadInt()
+		size=ReadInt()
+	End
+	
+	Method Count:Int(typeSize:Int)
+		Return size/typeSize
+	End
+	
+	Method JumpTo()
+		parentBsp.dataOffset=position
+	End
+End
+
+Class BspPalette
+	Field palette:UInt[]
+	
+	Method GetARGB:UInt(index:Int)
+		If Not palette Then palette=defPalette
+		If index*3+2>palette.Length Then Return -1
+		Return (255 Shl 24) | (palette[index*3] Shl 16) | (palette[index*3+1] Shl 8) | palette[index*3+2]
+	End
+	
+	Global defPalette:=New UInt[](0,0,0,
+		15,15,15,
+		31,31,31,
+		47,47,47,
+		63,63,63,
+		75,75,75,
+		91,91,91,
+		107,107,107,
+		123,123,123,
+		139,139,139,
+		155,155,155,
+		171,171,171,
+		187,187,187,
+		203,203,203,
+		219,219,219,
+		235,235,235,
+		15,11,7,
+		23,15,11,
+		31,23,11,
+		39,27,15,
+		47,35,19,
+		55,43,23,
+		63,47,23,
+		75,55,27,
+		83,59,27,
+		91,67,31,
+		99,75,31,
+		107,83,31,
+		115,87,31,
+		123,95,35,
+		131,103,35,
+		143,111,35,
+		11,11,15,
+		19,19,27,
+		27,27,39,
+		39,39,51,
+		47,47,63,
+		55,55,75,
+		63,63,87,
+		71,71,103,
+		79,79,115,
+		91,91,127,
+		99,99,139,
+		107,107,151,
+		115,115,163,
+		123,123,175,
+		131,131,187,
+		139,139,203,
+		0,0,0,
+		7,7,0,
+		11,11,0,
+		19,19,0,
+		27,27,0,
+		35,35,0,
+		43,43,7,
+		47,47,7,
+		55,55,7,
+		63,63,7,
+		71,71,7,
+		75,75,11,
+		83,83,11,
+		91,91,11,
+		99,99,11,
+		107,107,15,
+		7,0,0,
+		15,0,0,
+		23,0,0,
+		31,0,0,
+		39,0,0,
+		47,0,0,
+		55,0,0,
+		63,0,0,
+		71,0,0,
+		79,0,0,
+		87,0,0,
+		95,0,0,
+		103,0,0,
+		111,0,0,
+		119,0,0,
+		127,0,0,
+		19,19,0,
+		27,27,0,
+		35,35,0,
+		47,43,0,
+		55,47,0,
+		67,55,0,
+		75,59,7,
+		87,67,7,
+		95,71,7,
+		107,75,11,
+		119,83,15,
+		131,87,19,
+		139,91,19,
+		151,95,27,
+		163,99,31,
+		175,103,35,
+		35,19,7,
+		47,23,11,
+		59,31,15,
+		75,35,19,
+		87,43,23,
+		99,47,31,
+		115,55,35,
+		127,59,43,
+		143,67,51,
+		159,79,51,
+		175,99,47,
+		191,119,47,
+		207,143,43,
+		223,171,39,
+		239,203,31,
+		255,243,27,
+		11,7,0,
+		27,19,0,
+		43,35,15,
+		55,43,19,
+		71,51,27,
+		83,55,35,
+		99,63,43,
+		111,71,51,
+		127,83,63,
+		139,95,71,
+		155,107,83,
+		167,123,95,
+		183,135,107,
+		195,147,123,
+		211,163,139,
+		227,179,151,
+		171,139,163,
+		159,127,151,
+		147,115,135,
+		139,103,123,
+		127,91,111,
+		119,83,99,
+		107,75,87,
+		95,63,75,
+		87,55,67,
+		75,47,55,
+		67,39,47,
+		55,31,35,
+		43,23,27,
+		35,19,19,
+		23,11,11,
+		15,7,7,
+		187,115,159,
+		175,107,143,
+		163,95,131,
+		151,87,119,
+		139,79,107,
+		127,75,95,
+		115,67,83,
+		107,59,75,
+		95,51,63,
+		83,43,55,
+		71,35,43,
+		59,31,35,
+		47,23,27,
+		35,19,19,
+		23,11,11,
+		15,7,7,
+		219,195,187,
+		203,179,167,
+		191,163,155,
+		175,151,139,
+		163,135,123,
+		151,123,111,
+		135,111,95,
+		123,99,83,
+		107,87,71,
+		95,75,59,
+		83,63,51,
+		67,51,39,
+		55,43,31,
+		39,31,23,
+		27,19,15,
+		15,11,7,
+		111,131,123,
+		103,123,111,
+		95,115,103,
+		87,107,95,
+		79,99,87,
+		71,91,79,
+		63,83,71,
+		55,75,63,
+		47,67,55,
+		43,59,47,
+		35,51,39,
+		31,43,31,
+		23,35,23,
+		15,27,19,
+		11,19,11,
+		7,11,7,
+		255,243,27,
+		239,223,23,
+		219,203,19,
+		203,183,15,
+		187,167,15,
+		171,151,11,
+		155,131,7,
+		139,115,7,
+		123,99,7,
+		107,83,0,
+		91,71,0,
+		75,55,0,
+		59,43,0,
+		43,31,0,
+		27,15,0,
+		11,7,0,
+		0,0,255,
+		11,11,239,
+		19,19,223,
+		27,27,207,
+		35,35,191,
+		43,43,175,
+		47,47,159,
+		47,47,143,
+		47,47,127,
+		47,47,111,
+		47,47,95,
+		43,43,79,
+		35,35,63,
+		27,27,47,
+		19,19,31,
+		11,11,15,
+		43,0,0,
+		59,0,0,
+		75,7,0,
+		95,7,0,
+		111,15,0,
+		127,23,7,
+		147,31,7,
+		163,39,11,
+		183,51,15,
+		195,75,27,
+		207,99,43,
+		219,127,59,
+		227,151,79,
+		231,171,95,
+		239,191,119,
+		247,211,139,
+		167,123,59,
+		183,155,55,
+		199,195,55,
+		231,227,87,
+		127,191,255,
+		171,231,255,
+		215,255,255,
+		103,0,0,
+		139,0,0,
+		179,0,0,
+		215,0,0,
+		255,0,0,
+		255,243,147,
+		255,247,199,
+		255,255,255,
+		159, 91, 83)
+End
+
+'Extend Mesh to support Bsp
+Class Mesh Extension
+	Function CreateFromBsp:Mesh(bsp:Bsp,id:Int=0)
+		'Get the bsp model specified
+		Local model:BspModel=bsp.models[id]
+		Local mesh:Mesh=New Mesh
+		
+		If model Then
+			'Print "Generating model: "+id
+		Else
+			Print "No model to generate at id: "+id
+			Return Null
+		Endif
+		
+		Local face:BspFace
+		Local faceNr:Int
+		Local edge:BspEdge
+		Local edgeNr:Int
+		Local ledge:BspLedge
+		Local plane:BspPlane
+		Local surface:BspSurface
+		Local vert:BspVertex
+		Local vertCount:Int
+		Local vertCountNew:Int
+		
+		Local s:Double
+		Local t:Double
+		
+		Local triV:Int
+		
+		Local i:Int
+		Local mipUsed:Bool
+		
+		bsp.lastMipTexs.Clear()
+		
+		'Go through faces
+		For faceNr=model.faceID Until model.faceID+model.faceNum
+			'Print "Face: "+faceNr
+			face=bsp.faces[faceNr]
+			plane=bsp.planes[face.planeID]
+			surface=bsp.surfaces[face.texInfoID]
+			
+			'Reset new vertex counter
+			vertCountNew=0
+			
+			'Go through edges
+			For edgeNr=face.ledgeID Until face.ledgeID+face.ledgeNum
+				'Print "Edge: "+edgeNr
+				ledge=bsp.ledges[edgeNr] 'Get ledge
+				edge=bsp.edges[Abs(ledge.edge)] 'Get edge via ledge
+				
+				'Select vertex
+				If ledge.edge<0 Then
+					vert=bsp.vertices[edge.vertex0]
+				Else
+					vert=bsp.vertices[edge.vertex1]
+				Endif
+				
+				'Calculate UV
+				s=vert.Dot(surface.vectorS)+surface.distS
+				t=vert.Dot(surface.vectorT)+surface.distT
+				s/=bsp.mipTexs[surface.textureID].width
+				t/=bsp.mipTexs[surface.textureID].height
+				
+				Local v:=New Vertex3f(-vert.y, vert.z, vert.x, s, t, plane.normal.X, plane.normal.Y, plane.normal.Z)
+				mesh.AddVertex(v)
+				
+				vertCount+=1
+				vertCountNew+=1
+			Next
+			
+			'Is this a new texture?
+			mipUsed=False
+			For i=0 Until bsp.lastMipTexs.Length
+				If bsp.lastMipTexs[i].id=surface.textureID Then
+					mipUsed=True
+					Exit
+				Endif
+			Next
+			
+			'Yep! New texture
+			If Not mipUsed Then
+				'Prepare mesh that we're using another material
+				If i>=mesh.NumMaterials Then mesh.AddMaterials(1)
+				'Add the new texture
+				bsp.lastMipTexs.Push(bsp.mipTexs[surface.textureID])
+				i=bsp.lastMipTexs.Length-1
+			Endif
+			
+			'Make Tris
+			For triV=vertCount-vertCountNew Until vertCount-2
+				mesh.AddTriangle(vertCount-vertCountNew,triV+1,triV+2,i)
+			Next
+			
+		Next
+		
+		Return mesh
+	End
+End
+
+'Extend Model to support Bsp
+Class Model Extension
+	Function CreateFromBsp:Model(bsp:Bsp,id:Int=0,parent:Entity=Null)
+		Local mesh:=mojo3d.graphics.Mesh.CreateFromBsp(bsp,id)
+		Local model:=New Model(mesh,New PbrMaterial,parent)
+		
+		'If materialParent Then
+		'	model=New Model(mesh,materialParent.Material,parent)
+		'	model.Materials=materialParent.Materials
+		'Else
+		'	
+		'	model.Materials=New Material[bsp.mipTexs.Length]
+		'Endif
+		
+		'For Local i:Int=0 Until model.Materials.Length
+		'	If Not bsp.mipTexs[i] Or Not bsp.mipTexs[i].texture Then Continue
+		'	model.Materials[i]=bsp.mipTexs[i].material
+		'Next
+		
+		model.Materials=New Material[bsp.lastMipTexs.Length]
+		For Local i:Int=0 Until model.Materials.Length
+			model.Materials[i]=bsp.lastMipTexs[i].material
+		Next
+		
+		Return model
+	End
+End
+
+'=EXAMPLE=
+Class MyWindow Extends Window
+	Field scene:Scene
+	Field camera:Camera
+	Field light:Light
+	Field bsp:Bsp
+	Field map:Model[]
+	Field fog:FogEffect
+	
+	Method New(title:String="Bsp Loader",width:Int=1280/1.5,height:Int=720/1.5,flags:WindowFlags=WindowFlags.Resizable)
+		Super.New(title,width,height,flags)
+		
+		scene=Scene.GetCurrent()
+		scene.ClearColor=Color.None
+		scene.AmbientLight=Color.White
+		
+		'create camera
+		camera=New Camera
+		camera.Near=0.1
+		camera.Far=5000
+		
+		'fog effect
+		fog=New FogEffect
+		fog.Color=scene.ClearColor
+		fog.Near=camera.Far*0.75
+		fog.Far=camera.Far
+		
+		'create light
+		light=New Light
+		light.RotateX( Pi/2 )	'aim directional light 'down' - Pi/2=90 degrees.
+		
+		'Load our BSP
+		Self.OpenBsp("asset::start.bsp")
+	End
+	
+	Method OpenBsp(path:String)
+		bsp=Bsp.Load(path)
+		
+		'Remove all old models
+		If map Then
+			For Local m:Model=Eachin map
+				If m Then m.Destroy()
+			Next
+		Endif
+		
+		If bsp Then
+			'Prepare model array
+			map=New Model[bsp.models.Length]
+			
+			
+			'Load world model
+			map[0]=Model.CreateFromBsp(bsp,0)
+			
+			'Do entity stuff
+			For Local e:BspEntity=Eachin bsp.entities
+				'Set start position
+				If e.className="info_player_start" Then
+					camera.SetPosition(e.origin)
+					camera.MoveY(25)
+					camera.SetRotation(0,e.Radians,0)
+				Endif
+				
+				'Make entity models
+				If e.model And Not e.className.StartsWith("trigger_") Then
+					map[e.model]=Model.CreateFromBsp(bsp,e.model)
+				Endif
+				
+			Next
+		Endif
+	End
+	
+	Method OnRender(canvas:Canvas) Override
+		If Keyboard.KeyHit(Key.F8) Then
+			Local file:=RequestFile("Select Bsp","Bsp files:bsp;All files:*",False)
+			If file Then OpenBsp(file)
+		Endif
+		
+		RequestRender()
+		Fly(camera,Self)
+		'light.Position=camera.Position
+		scene.Render(canvas,camera)
+		'map.Rotate(.001,.002,.003)
+		canvas.DrawText("FPS="+App.FPS,0,0)
+	End
+	
+End
+
+Function Main()
+	New AppInstance
+	New MyWindow
+	App.Run()
+End
+
+Function Fly(entity:Entity,view:View,speed:Float=2.5)
+	
+	Local spd:Float=speed
+	If Keyboard.KeyDown(Key.LeftShift) Or Keyboard.KeyDown(Key.RightShift) Then spd*=0.5
+	
+	If Keyboard.KeyDown(Key.Left)
+		entity.RotateY(.05,True)
+	ElseIf Keyboard.KeyDown(Key.Right)
+		entity.RotateY(-.05,True)
+	Endif
+	
+	If Keyboard.KeyDown(Key.Up)
+		entity.RotateX(-.05)
+	ElseIf Keyboard.KeyDown(Key.Down)
+		entity.RotateX(.05)
+	Endif
+	
+	If Keyboard.KeyDown(Key.W)
+		entity.MoveZ(spd)
+	ElseIf Keyboard.KeyDown(Key.S)
+		entity.MoveZ(-spd)
+	Endif
+	
+	If Keyboard.KeyDown(Key.D)
+		entity.MoveX(spd)
+	ElseIf Keyboard.KeyDown(Key.A)
+		entity.MoveX(-spd)
+	Endif
+	
+	If Keyboard.KeyDown(Key.Space)
+		entity.MoveY(spd)
+	ElseIf Keyboard.KeyDown(Key.LeftControl) Or Keyboard.KeyDown(Key.C)
+		entity.MoveY(-spd)
+	Endif
+	
+End
