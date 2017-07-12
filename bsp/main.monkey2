@@ -3,6 +3,7 @@ Namespace myapp
 #Import "<std>"
 #Import "<mojo>"
 #Import "<mojo3d>"
+#Import "<mojo3d-physics>"
 
 #Import "assets/"
 
@@ -13,7 +14,7 @@ Using mojo3d..
 'http://www.gamers.org/dEngine/quake/spec/quake-spec34/qkspec_4.htm
 
 Class Bsp Extends BspReader
-	Const SCALE:Float=0.1
+	Const SCALE:Float=0.075
 	
 	Field data:DataBuffer
 	Field dataOffset:UInt
@@ -30,9 +31,14 @@ Class Bsp Extends BspReader
 	Field models:BspModel[]
 	Field mipTexs:BspMipTex[]
 	Field palette:=New BspPalette
-	Field skyTexture:Texture
+	Field animSpeed:Float=5.6
+	Field lastAnimFrame:Int
+	Field animTimeOffset:Double
 	
-	Field lastMipTexs:=New Stack<BspMipTex>
+	Field modelMipTexs:Stack<BspMipTex>[]
+	
+	'Default texture flags for all textures
+	Field textureFlags:=TextureFlags.WrapST|TextureFlags.Mipmap
 	
 	Function Load:Bsp(path:String)
 		Local nB:=New Bsp
@@ -53,8 +59,6 @@ Class Bsp Extends BspReader
 		Local num:Int
 		Local i:Int
 		
-		skyTexture=Null
-		
 		'Get header and entry data
 		Self.header=New BspHeader(Self)
 		
@@ -63,7 +67,7 @@ Class Bsp Extends BspReader
 		Local entStr:String=ReadString(Self.header.entities.size) 'Get entire string
 		Local entSplit:=entStr.Split("{") 'Split each entity
 		For i=0 Until entSplit.Length 'Create a new entity from each split
-			Self.entities.AddLast(New BspEntity(entSplit[i]))
+			Self.entities.AddLast(New BspEntity(entSplit[i],Self))
 		Next
 		
 		Print "Entities: "+Self.entities.Count()
@@ -108,6 +112,10 @@ Class Bsp Extends BspReader
 			Self.mipTexs[i]=New BspMipTex(Self,i)
 			Self.mipTexs[i].Generate()
 		Next
+		For i=0 Until num 'Find animations!
+			If Not Self.mipTexs[i] Then Continue
+			Self.mipTexs[i].FindAnimation()
+		Next
 		
 		'Process faces
 		num=Self.header.faces.Count(BspFace.Size())
@@ -144,10 +152,50 @@ Class Bsp Extends BspReader
 		For i=0 Until num
 			Self.models[i]=New BspModel(Self)
 		Next
+		
+		Self.modelMipTexs=New Stack<BspMipTex>[num]
+		For i=0 Until num
+			Self.modelMipTexs[i]=New Stack<BspMipTex>
+		Next
+		
+		GCCollect()
+		ResetAnimTime()
 	End
 	
-	Property Sky:Texture()
-		Return skyTexture
+	Method ResetAnimTime()
+		animTimeOffset=Now()
+	End
+	
+	Method Update()
+		'Get animation time
+		Local n:Int=Floor((Now()-animTimeOffset)*animSpeed)
+		
+		'Time to update animations
+		If lastAnimFrame<n Then 
+			
+			'Reset all updatedFrame flags
+			For Local m:=Eachin Self.mipTexs
+				m.updatedFrame=False
+			Next
+			
+			'Do animations
+			For Local i:Int=0 Until Self.modelMipTexs.Length
+			For Local m:=Eachin Self.modelMipTexs[i]
+				If m.updatedFrame Then Continue
+				If Not m.material Or Not m.nextAnimation Then Continue
+				If Not m.curAnimation Then m.curAnimation=m
+				m.updatedFrame=True
+				
+				For Local u:Int=0 Until n-lastAnimFrame
+					m.curAnimation=Self.mipTexs[m.curAnimation.nextAnimation.id]
+				Next
+				
+				Cast<PbrMaterial>(m.material).EmissiveTexture=Self.mipTexs[m.curAnimation.id].texture
+			Next
+			Next
+			
+			lastAnimFrame=n
+		Endif
 	End
 End
 
@@ -163,16 +211,60 @@ Class BspMipTex Extends BspReader
 	Field id:Int
 	Field pix:Pixmap
 	Field pixels:UByte[,]
-	Field animStep:Int
 	Field texture:Texture
+	Field nextAnimation:BspMipTex
+	Field curAnimation:BspMipTex
+	Field ownFrame:Int
 	Field material:Material
+	Field updatedFrame:Bool
 	
 	Field masked:Bool
 	
+	Method FindAnimation()
+		If Not name.StartsWith("+") Then
+			nextAnimation=Null
+			ownFrame=0
+			Return
+		Endif
+		
+		'Find our frame number
+		ownFrame=Int(name.Mid(1,1))
+		
+		'Next expected frame name
+		Local findName:String="+"+(ownFrame+1)+name.Slice(2)
+		
+		'Does a texture with this name exist?
+		For Local m:=Eachin parentBsp.mipTexs
+			If m.name=findName Then
+				'It does!
+				nextAnimation=m
+				'Print name+" turns into "+nextAnimation.name
+				Return 'We're done here
+			End
+		Next
+		
+		'No match was found, find lowest frame
+		For Local i:Int=0 Until ownFrame
+			findName="+"+i+name.Slice(2)
+			
+			For Local m:=Eachin parentBsp.mipTexs
+				If m.name=findName Then
+					nextAnimation=m
+					'Print name+" loops back to "+nextAnimation.name
+					Return
+				End
+			Next
+			
+		Next
+		
+		Print name+" is animation but has no frames"
+		nextAnimation=Null
+	End
+	
 	Method Generate()
 		JumpTo()
-		If width<=1 And height<=1 Then
-			Print "Invalid textures size"
+		If width<=1 Or height<=1 Or width>1024*4 Or height>1024*4 Then
+			Print "Invalid texture size: "+width+"x"+height
 			Return
 		Endif
 		
@@ -203,7 +295,7 @@ Class BspMipTex Extends BspReader
 		Next
 		
 		'Just add a normal texture
-		If Not texture Then texture=New Texture(pix,TextureFlags.WrapST)
+		If Not texture Then texture=New Texture(pix,parentBsp.textureFlags)
 		
 		'Enable liquids
 		If name.StartsWith("*") Then
@@ -300,9 +392,9 @@ Class BspSurface Extends BspReader
 	Method New(parent:Bsp)
 		Self.parentBsp=parent
 		
-		vectorS=ReadVec3f()
+		vectorS=ReadVec3f()/parentBsp.SCALE
 		distS=ReadFloat()
-		vectorT=ReadVec3f()
+		vectorT=ReadVec3f()/parentBsp.SCALE
 		distT=ReadFloat()
 		textureID=ReadInt()
 		animated=ReadInt()
@@ -344,7 +436,7 @@ Class BspModel Extends BspReader
 		Self.parentBsp=parent
 		
 		box=New BspBox(parent)
-		origin=ReadVec3f()
+		origin=ReadVec3f()*parentBsp.SCALE
 		node0=ReadInt()
 		node1=ReadInt()
 		node2=ReadInt()
@@ -406,6 +498,31 @@ Class BspFace Extends BspReader
 	Field light:=New Byte[2]
 	Field lightMap:Int
 	
+	'Lightmap stuff
+	Field doneLightmap:Bool
+	Field lightDist:Vec2i
+	Field lightMinUV:Vec2f
+	Field lightMaxUV:Vec2f
+	Field lightS:Float
+	Field lightT:Float
+	Field lightMapSize:Vec2i
+	Field lightMapPos:Vec2f
+	
+	Method CalcLightmapSize:Vec2i()
+		If Self.lightMap<0 Then Return New Vec2i
+		
+		If doneLightmap Then
+			'Return same if already calculated
+			Return lightMapSize
+		Else
+			'Being a new calculation!
+			lightMapSize=New Vec2i
+			doneLightmap=True
+		EndIf
+		
+		Return lightMapSize
+	End
+	
 	Method New(parent:Bsp)
 		Self.parentBsp=parent
 		
@@ -434,9 +551,9 @@ Class BspVertex Extends BspReader
 	Method New(parent:Bsp)
 		Self.parentBsp=parent
 		
-		x=ReadFloat()
-		y=ReadFloat()
-		z=ReadFloat()
+		x=ReadFloat()*parentBsp.SCALE
+		y=ReadFloat()*parentBsp.SCALE
+		z=ReadFloat()*parentBsp.SCALE
 	End
 	
 	Function Size:Int()
@@ -476,6 +593,7 @@ Class BspEntity
 	Field origin:Vec3<Int>
 	Field angle:Double
 	Field model:Int
+	Field parentBsp:Bsp
 	
 	Property Angle:Double()
 		Return angle
@@ -485,7 +603,9 @@ Class BspEntity
 		Return angle*(Pi/180.0)
 	End
 	
-	Method New(str:String)
+	Method New(str:String,parent:Bsp)
+		Self.parentBsp=parent
+		
 		'Construct from data string
 		data.Clear()
 		
@@ -522,6 +642,7 @@ Class BspEntity
 							origin.X=-Int(vecSplit[1])
 							origin.Y=Int(vecSplit[2])
 							origin.Z=Int(vecSplit[0])
+							origin*=parentBsp.SCALE
 						Case "angle"
 							angle=Int(lastValue)
 						Case "model"
@@ -995,7 +1116,7 @@ Class Mesh Extension
 		Local i:Int
 		Local mipUsed:Bool
 		
-		bsp.lastMipTexs.Clear()
+		bsp.modelMipTexs[id].Clear()
 		
 		'Go through faces
 		For faceNr=model.faceID Until model.faceID+model.faceNum
@@ -1020,23 +1141,34 @@ Class Mesh Extension
 					vert=bsp.vertices[edge.vertex1]
 				Endif
 				
-				'Calculate UV
+				'Make vertex
+				Local v:=New Vertex3f(-vert.y, vert.z, vert.x, s, t)
+				
+				'Prepare UVs
 				s=vert.Dot(surface.vectorS)+surface.distS
 				t=vert.Dot(surface.vectorT)+surface.distT
+				
+				'Texture UV
 				s/=bsp.mipTexs[surface.textureID].width
 				t/=bsp.mipTexs[surface.textureID].height
+				v.texCoord0.x=s
+				v.texCoord0.y=t
 				
-				Local v:=New Vertex3f(-vert.y, vert.z, vert.x, s, t, plane.normal.X, plane.normal.Y, plane.normal.Z)
+				'Normals
+				v.normal=plane.normal
+				
+				'Add vertex to mesh
 				mesh.AddVertex(v)
 				
+				'Count!
 				vertCount+=1
 				vertCountNew+=1
 			Next
 			
 			'Is this a new texture?
 			mipUsed=False
-			For i=0 Until bsp.lastMipTexs.Length
-				If bsp.lastMipTexs[i].id=surface.textureID Then
+			For i=0 Until bsp.modelMipTexs[id].Length
+				If bsp.modelMipTexs[id][i].id=surface.textureID Then
 					mipUsed=True
 					Exit
 				Endif
@@ -1047,8 +1179,8 @@ Class Mesh Extension
 				'Prepare mesh that we're using another material
 				If i>=mesh.NumMaterials Then mesh.AddMaterials(1)
 				'Add the new texture
-				bsp.lastMipTexs.Push(bsp.mipTexs[surface.textureID])
-				i=bsp.lastMipTexs.Length-1
+				bsp.modelMipTexs[id].Push(bsp.mipTexs[surface.textureID])
+				i=bsp.modelMipTexs[id].Length-1
 			Endif
 			
 			'Make Tris
@@ -1068,22 +1200,10 @@ Class Model Extension
 		Local mesh:=mojo3d.graphics.Mesh.CreateFromBsp(bsp,id)
 		Local model:=New Model(mesh,New PbrMaterial,parent)
 		
-		'If materialParent Then
-		'	model=New Model(mesh,materialParent.Material,parent)
-		'	model.Materials=materialParent.Materials
-		'Else
-		'	
-		'	model.Materials=New Material[bsp.mipTexs.Length]
-		'Endif
-		
-		'For Local i:Int=0 Until model.Materials.Length
-		'	If Not bsp.mipTexs[i] Or Not bsp.mipTexs[i].texture Then Continue
-		'	model.Materials[i]=bsp.mipTexs[i].material
-		'Next
-		
-		model.Materials=New Material[bsp.lastMipTexs.Length]
+		'Apply materials
+		model.Materials=New Material[bsp.modelMipTexs[id].Length]
 		For Local i:Int=0 Until model.Materials.Length
-			model.Materials[i]=bsp.lastMipTexs[i].material
+			model.Materials[i]=bsp.modelMipTexs[id][i].material
 		Next
 		
 		Return model
@@ -1098,23 +1218,32 @@ Class MyWindow Extends Window
 	Field bsp:Bsp
 	Field map:Model[]
 	Field fog:FogEffect
+	Field testBall:Model
+	Field testBallCol:Collider
+	Field testBallBody:RigidBody
+	Field testBox:Model
 	
 	Method New(title:String="Bsp Loader",width:Int=1280/1.5,height:Int=720/1.5,flags:WindowFlags=WindowFlags.Resizable)
 		Super.New(title,width,height,flags)
 		
 		scene=Scene.GetCurrent()
-		scene.ClearColor=Color.None
-		scene.AmbientLight=Color.White
+		scene.ClearColor=Color.Black
+		scene.AmbientLight=Color.Black
+		
+		'Set env texture to black
+		Local pixmap:=New Pixmap(4,3)
+		pixmap.Clear(Color.Black)
+		Scene.GetCurrent().EnvTexture=New Texture(pixmap,TextureFlags.Cubemap)
 		
 		'create camera
 		camera=New Camera
 		camera.Near=0.1
-		camera.Far=5000
+		camera.Far=2500
 		
 		'fog effect
 		fog=New FogEffect
 		fog.Color=scene.ClearColor
-		fog.Near=camera.Far*0.75
+		fog.Near=camera.Far-500
 		fog.Far=camera.Far
 		
 		'create light
@@ -1123,6 +1252,26 @@ Class MyWindow Extends Window
 		
 		'Load our BSP
 		Self.OpenBsp("asset::start.bsp")
+		
+		'Test box
+		'Local mat:=New PbrMaterial(Color.Black,0,1)
+		'mat.EmissiveFactor=Color.White
+		'mat.EmissiveTexture=Texture.Load("asset::textures/test.png",bsp.textureFlags)
+		'testBox=Model.CreateBox(New Boxf(0,0,5,5,-5,-5),1,1,1,mat)
+		
+		'Test physics
+		'Local collider:=New MeshCollider(map[0].Mesh)
+		'Local body:=New RigidBody(0,collider,map[0])
+		
+		'testBall=Model.CreateSphere(20,24,12,New PbrMaterial(Color.Yellow))
+		'testBall.Move(-500,200,500)
+		'testBallCol=New SphereCollider(20)
+		'testBallBody=New RigidBody(1,testBallCol,testBall)
+		
+		'For Local m:=Eachin bsp.mipTexs
+		'	Cast<PbrMaterial>(m.material).ColorTexture=Texture.Load("asset::textures/test.png",bsp.textureFlags)
+		'	Cast<PbrMaterial>(m.material).ColorFactor=Color.White
+		'Next
 	End
 	
 	Method OpenBsp(path:String)
@@ -1139,6 +1288,8 @@ Class MyWindow Extends Window
 			'Prepare model array
 			map=New Model[bsp.models.Length]
 			
+			camera.SetPosition(New Vec3f(0,0,0))
+			camera.SetRotation(New Vec3f(0,0,0))
 			
 			'Load world model
 			map[0]=Model.CreateFromBsp(bsp,0)
@@ -1148,7 +1299,7 @@ Class MyWindow Extends Window
 				'Set start position
 				If e.className="info_player_start" Then
 					camera.SetPosition(e.origin)
-					camera.MoveY(25)
+					camera.MoveY(2)
 					camera.SetRotation(0,e.Radians,0)
 				Endif
 				
@@ -1158,6 +1309,7 @@ Class MyWindow Extends Window
 				Endif
 				
 			Next
+			
 		Endif
 	End
 	
@@ -1169,10 +1321,40 @@ Class MyWindow Extends Window
 		
 		RequestRender()
 		Fly(camera,Self)
+		
 		'light.Position=camera.Position
 		scene.Render(canvas,camera)
+		bsp.Update()
+		'World.GetDefault().Update()
 		'map.Rotate(.001,.002,.003)
-		canvas.DrawText("FPS="+App.FPS,0,0)
+		canvas.DrawText("FPS: "+App.FPS,0,0)
+		canvas.DrawText("F8 Load Bsp",0,canvas.Font.Height)
+		canvas.DrawText("F5 Reload Shaders",0,canvas.Font.Height*2)
+		
+		If Keyboard.KeyHit(Key.F5) Then
+			canvas.Color=Color.Black
+			canvas.DrawRect(canvas.Viewport)
+			Local lastShader:Shader
+			
+			For Local m:=Eachin bsp.mipTexs
+				If Not m.material Then Continue
+				
+				If lastShader And m.material.Shader.Name=lastShader.Name Then
+					m.material.Shader=lastShader
+				Else
+					m.material.Shader=New Shader(m.material.Shader.Name,LoadString("asset::shaders/"+m.material.Shader.Name+".glsl"))
+					lastShader=m.material.Shader
+				Endif
+			Next
+			
+			bsp.ResetAnimTime()
+			GCCollect()
+			Keyboard.FlushChars()
+			
+			canvas.Color=Color.Red
+			canvas.DrawText("Reloading shaders...",0,0)
+			canvas.Color=Color.White
+		Endif
 	End
 	
 End
@@ -1183,10 +1365,8 @@ Function Main()
 	App.Run()
 End
 
-Function Fly(entity:Entity,view:View,speed:Float=2.5)
-	
-	Local spd:Float=speed
-	If Keyboard.KeyDown(Key.LeftShift) Or Keyboard.KeyDown(Key.RightShift) Then spd*=0.5
+Function Fly(entity:Entity,view:View,speed:Float=0.25)
+	If Keyboard.KeyDown(Key.LeftShift) Or Keyboard.KeyDown(Key.RightShift) Then speed*=0.5
 	
 	If Keyboard.KeyDown(Key.Left)
 		entity.RotateY(.05,True)
@@ -1201,21 +1381,21 @@ Function Fly(entity:Entity,view:View,speed:Float=2.5)
 	Endif
 	
 	If Keyboard.KeyDown(Key.W)
-		entity.MoveZ(spd)
+		entity.MoveZ(speed)
 	ElseIf Keyboard.KeyDown(Key.S)
-		entity.MoveZ(-spd)
+		entity.MoveZ(-speed)
 	Endif
 	
 	If Keyboard.KeyDown(Key.D)
-		entity.MoveX(spd)
+		entity.MoveX(speed)
 	ElseIf Keyboard.KeyDown(Key.A)
-		entity.MoveX(-spd)
+		entity.MoveX(-speed)
 	Endif
 	
 	If Keyboard.KeyDown(Key.Space)
-		entity.MoveY(spd)
+		entity.MoveY(speed)
 	ElseIf Keyboard.KeyDown(Key.LeftControl) Or Keyboard.KeyDown(Key.C)
-		entity.MoveY(-spd)
+		entity.MoveY(-speed)
 	Endif
 	
 End

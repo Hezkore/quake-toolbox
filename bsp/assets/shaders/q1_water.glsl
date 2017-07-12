@@ -26,6 +26,8 @@ varying mat3 v_TanMatrix;
 
 #endif
 
+const float pi = 3.1415926535897932384626433832795;
+
 //@vertex
 
 //vertex attribs....
@@ -130,17 +132,19 @@ void main(){
 
 #if MX2_RENDERPASS==1
 
-	vec3 color=pow( texture2D( m_ColorTexture,v_TexCoord0 ).rgb,vec3( 2.2 ) ) * m_ColorFactor.rgb;
+	vec2 uv = v_TexCoord0 + vec2( sin(v_TexCoord0.t*pi + r_Time), cos(v_TexCoord0.s*pi + r_Time) )/8.0;
 	
-	vec3 emissive=pow( texture2D( m_EmissiveTexture,v_TexCoord0 + r_Time ).rgb,vec3( 2.2 ) ) * m_EmissiveFactor.rgb;
-	
-	float metalness=texture2D( m_MetalnessTexture,v_TexCoord0 ).b * m_MetalnessFactor;
-	
-	float roughness=texture2D( m_RoughnessTexture,v_TexCoord0 ).g * m_RoughnessFactor;
-	
-	float occlusion=texture2D( m_OcclusionTexture,v_TexCoord0 ).r;
+	vec3 color=pow( texture2D( m_ColorTexture, uv ).rgb,vec3( 2.2 ) ) * m_ColorFactor.rgb;
 
-	vec3 normal=texture2D( m_NormalTexture,v_TexCoord0 ).xyz * 2.0 - 1.0;
+	vec3 emissive=pow(texture2D( m_EmissiveTexture, uv).rgb, vec3( 2.2 ) ) * m_EmissiveFactor.rgb;
+	
+	float metalness=texture2D( m_MetalnessTexture, uv ).b * m_MetalnessFactor;
+	
+	float roughness=texture2D( m_RoughnessTexture, uv ).g * m_RoughnessFactor;
+	
+	float occlusion=texture2D( m_OcclusionTexture, uv ).r;
+
+	vec3 normal=texture2D( m_NormalTexture, uv ).xyz * 2.0 - 1.0;
 	
 	main0( color,emissive,metalness,roughness,occlusion,normal );
 	
