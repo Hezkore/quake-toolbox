@@ -11,6 +11,18 @@ Using std..
 Using mojo..
 Using mojo3d..
 
+Function Pow2Size:Int(n:Int)
+	Local t:Int=1
+	While t<n
+		t*=2
+	Wend
+	Return t
+End
+
+Function GenRGB:UInt(r:Int,g:Int,b:Int,a:Int=255)
+	Return (a Shl 24) | (r Shl 16) | (g Shl 8) | b
+End
+
 'http://www.gamers.org/dEngine/quake/spec/quake-spec34/qkspec_4.htm
 
 Class Bsp Extends BspReader
@@ -34,6 +46,10 @@ Class Bsp Extends BspReader
 	Field animSpeed:Float=5.6
 	Field lastAnimFrame:Int
 	Field animTimeOffset:Double
+	Field lightMapPixmap:Pixmap
+	Field lightmapTexture:Texture
+	Field lightMapStart:Vec2i
+	Field lightMapMaxH:Int
 	
 	Field modelMipTexs:Stack<BspMipTex>[]
 	
@@ -99,24 +115,6 @@ Class Bsp Extends BspReader
 			Self.surfaces[i]=New BspSurface(Self)
 		Next
 		
-		'Process mipmap headers
-		Self.header.mipTex.JumpTo()
-		Self.mipTexHeader=New BspMipHeader(Self)
-		num=Self.mipTexHeader.Count
-		Print "MipTexs: "+num
-		
-		'Process miptexs from mipmap header
-		num=Self.mipTexHeader.Count
-		Self.mipTexs=New BspMipTex[num]
-		For i=0 Until num
-			Self.mipTexs[i]=New BspMipTex(Self,i)
-			Self.mipTexs[i].Generate()
-		Next
-		For i=0 Until num 'Find animations!
-			If Not Self.mipTexs[i] Then Continue
-			Self.mipTexs[i].FindAnimation()
-		Next
-		
 		'Process faces
 		num=Self.header.faces.Count(BspFace.Size())
 		Print "Faces: "+num
@@ -158,6 +156,34 @@ Class Bsp Extends BspReader
 			Self.modelMipTexs[i]=New Stack<BspMipTex>
 		Next
 		
+		'Read lightmaps
+		For i=0 Until Self.faces.Length 'Store lightmap parts in big picture
+			Self.faces[i].CalcLightmapSize()
+			Self.faces[i].MakeLightmap()
+		Next
+		Self.lightmapTexture=New Texture(Self.lightMapPixmap,TextureFlags.FilterMipmap)
+		
+		'lightMapPixmap.Save("C:\Users\vital\Desktop\light.png")
+		
+		'Process mipmap headers
+		Self.header.mipTex.JumpTo()
+		Self.mipTexHeader=New BspMipHeader(Self)
+		num=Self.mipTexHeader.Count
+		Print "MipTexs: "+num
+		
+		'Process miptexs from mipmap header
+		num=Self.mipTexHeader.Count
+		Self.mipTexs=New BspMipTex[num]
+		For i=0 Until num
+			Self.mipTexs[i]=New BspMipTex(Self,i)
+			Self.mipTexs[i].Generate()
+		Next
+		For i=0 Until num 'Find animations!
+			If Not Self.mipTexs[i] Then Continue
+			Self.mipTexs[i].FindAnimation()
+		Next
+		
+		'Cleanup
 		GCCollect()
 		ResetAnimTime()
 	End
@@ -169,6 +195,7 @@ Class Bsp Extends BspReader
 	Method Update()
 		'Get animation time
 		Local n:Int=Floor((Now()-animTimeOffset)*animSpeed)
+		Local tmpM:QuakeMaterial
 		
 		'Time to update animations
 		If lastAnimFrame<n Then 
@@ -183,14 +210,18 @@ Class Bsp Extends BspReader
 			For Local m:=Eachin Self.modelMipTexs[i]
 				If m.updatedFrame Then Continue
 				If Not m.material Or Not m.nextAnimation Then Continue
+				
 				If Not m.curAnimation Then m.curAnimation=m
+				
 				m.updatedFrame=True
+				tmpM=Cast<QuakeMaterial>(m.material)
+				If Not tmpM Then Continue
 				
 				For Local u:Int=0 Until n-lastAnimFrame
-					m.curAnimation=Self.mipTexs[m.curAnimation.nextAnimation.id]
+					m.curAnimation=m.curAnimation.nextAnimation
 				Next
 				
-				Cast<PbrMaterial>(m.material).EmissiveTexture=Self.mipTexs[m.curAnimation.id].texture
+				tmpM.EmissiveTexture=m.curAnimation.texture
 			Next
 			Next
 			
@@ -317,9 +348,11 @@ Class BspMipTex Extends BspReader
 		
 		'Just add a normal Quake material
 		If Not material Then
-			Local mat:=New PbrMaterial(Color.Black,1,1)
+			Local mat:=New QuakeMaterial(Color.Black,1,1)
 			mat.EmissiveTexture=texture
 			mat.EmissiveFactor=Color.White
+			mat.LightmapTexture=parentBsp.lightmapTexture
+			mat.UseMask=masked
 			material=mat
 		Endif
 		
@@ -355,6 +388,121 @@ Class BspMipTex Extends BspReader
 	
 	Function Size:Int()
 		Return 16+(4*6)
+	End
+End
+
+Class QuakeMaterial Extends Material
+	Method New()
+		Super.New(Shader.Open("q1_material" ) )
+		
+		ColorTexture=Texture.ColorTexture( Color.White )
+		ColorFactor=Color.White
+		
+		EmissiveTexture=Texture.ColorTexture( Color.White )
+		EmissiveFactor=Color.Black
+	
+		MetalnessTexture=Texture.ColorTexture( Color.White )
+		MetalnessFactor=1.0
+		
+		RoughnessTexture=Texture.ColorTexture( Color.White )
+		RoughnessFactor=1.0
+		
+		OcclusionTexture=Texture.ColorTexture( Color.White )
+		
+		LightmapTexture=Texture.ColorTexture( Color.White )
+		
+		UseMask=False
+		
+		NormalTexture=Texture.ColorTexture( New Color( 0.5,0.5,1.0,0.0 ) )
+	End
+	
+	Method New(material:QuakeMaterial)
+		Super.New(material)
+	End
+	
+	Method New(color:Color,metalness:Float=0.0,roughness:Float=1.0)
+		Self.New()
+		
+		ColorFactor=color
+		MetalnessFactor=metalness
+		RoughnessFactor=roughness
+	End
+	
+	Method Copy:QuakeMaterial() Override
+		Return New QuakeMaterial( Self )
+	End
+	
+	Property UseMask:Float()
+		Return Uniforms.GetFloat( "UseMask" )
+	Setter( enabled:Float )
+		Uniforms.SetFloat( "UseMask",enabled )
+	End
+	
+	
+	Property ColorTexture:Texture()
+		Return Uniforms.GetTexture( "ColorTexture" )
+	Setter( texture:Texture )
+		Uniforms.SetTexture( "ColorTexture",texture )
+	End
+	
+	Property ColorFactor:Color()
+		Return Uniforms.GetColor( "ColorFactor" )
+	Setter( color:Color )
+		Uniforms.SetColor( "ColorFactor",color )
+	End
+	
+	Property EmissiveTexture:Texture()
+		Return Uniforms.GetTexture( "EmissiveTexture" )
+	Setter( texture:Texture )
+		Uniforms.SetTexture( "EmissiveTexture",texture )
+	End
+	
+	Property EmissiveFactor:Color()
+		Return Uniforms.GetColor( "EmissiveFactor" )
+	Setter( color:Color )
+		Uniforms.SetColor( "EmissiveFactor",color )
+	End
+	
+	Property MetalnessTexture:Texture()
+		Return Uniforms.GetTexture( "MetalnessTexture" )
+	Setter( texture:Texture )
+		Uniforms.SetTexture( "MetalnessTexture",texture )
+	End
+
+	Property MetalnessFactor:Float()
+		Return Uniforms.GetFloat( "MetalnessFactor" )
+	Setter( factor:Float )
+		Uniforms.SetFloat( "MetalnessFactor",factor )
+	End
+	
+	Property RoughnessTexture:Texture()
+		Return Uniforms.GetTexture( "RoughnessTexture" )
+	Setter( texture:Texture )
+		Uniforms.SetTexture( "RoughnessTexture",texture )
+	End
+	
+	Property RoughnessFactor:Float()
+		Return Uniforms.GetFloat( "RoughnessFactor" )
+	Setter( factor:Float )
+		Uniforms.SetFloat( "RoughnessFactor",factor )
+	End
+
+	Property OcclusionTexture:Texture()
+		Return Uniforms.GetTexture( "occlusion" )
+	Setter( texture:Texture )
+		Uniforms.SetTexture( "OcclusionTexture",texture )
+	End
+	
+	Property LightmapTexture:Texture()
+		Return Uniforms.GetTexture( "LightmapTexture" )
+	Setter( texture:Texture )
+		Uniforms.SetTexture( "LightmapTexture",texture )
+	End
+	
+	Property NormalTexture:Texture()
+		Return Uniforms.GetTexture( "NormalTexture" )
+	Setter( texture:Texture )
+		Uniforms.SetTexture( "NormalTexture",texture )
 	End
 End
 
@@ -467,79 +615,18 @@ Class BspLedge Extends BspReader
 End
 
 Class BspEdge Extends BspReader
-	Field vertex0:Short
-	Field vertex1:Short
+	Field vertex0:UShort
+	Field vertex1:UShort
 	
 	Method New(parent:Bsp)
 		Self.parentBsp=parent
 		
-		vertex0=ReadShort()
-		vertex1=ReadShort()
+		vertex0=ReadUShort()
+		vertex1=ReadUShort()
 	End
 	
 	Function Size:Int()
 		Return 2*2
-	End
-End
-
-Class BspFace Extends BspReader
-	Const LIGHT_PAD:Int = 1
-	
-	Field planeID:Short
-	
-	Field side:Short
-	Field ledgeID:Int
-	
-	Field ledgeNum:Short
-	Field texInfoID:Short
-	
-	Field typeLight:Byte
-	Field baseLight:Byte
-	Field light:=New Byte[2]
-	Field lightMap:Int
-	
-	'Lightmap stuff
-	Field doneLightmap:Bool
-	Field lightDist:Vec2i
-	Field lightMinUV:Vec2f
-	Field lightMaxUV:Vec2f
-	Field lightS:Float
-	Field lightT:Float
-	Field lightMapSize:Vec2i
-	Field lightMapPos:Vec2f
-	
-	Method CalcLightmapSize:Vec2i()
-		If Self.lightMap<0 Then Return New Vec2i
-		
-		If doneLightmap Then
-			'Return same if already calculated
-			Return lightMapSize
-		Else
-			'Being a new calculation!
-			lightMapSize=New Vec2i
-			doneLightmap=True
-		EndIf
-		
-		Return lightMapSize
-	End
-	
-	Method New(parent:Bsp)
-		Self.parentBsp=parent
-		
-		planeID=ReadShort()
-		side=ReadShort()
-		ledgeID=ReadInt()
-		ledgeNum=ReadShort()
-		texInfoID=ReadShort()
-		typeLight=ReadByte()
-		baseLight=ReadByte()
-		light[0]=ReadByte()
-		light[1]=ReadByte()
-		lightMap=ReadInt()
-	End
-	
-	Function Size:Int()
-		Return (2*4)+(4*2)+4
 	End
 End
 
@@ -1083,6 +1170,185 @@ Class BspPalette
 		159, 91, 83)
 End
 
+Class BspFace Extends BspReader
+	Const LIGHT_PAD:Int=1
+	
+	Field planeID:UShort
+	
+	Field side:UShort
+	Field ledgeID:Int
+	
+	Field ledgeNum:Short
+	Field texInfoID:Short
+	
+	Field typeLight:Byte
+	Field baseLight:Byte
+	Field light:=New Byte[2]
+	Field lightMap:Int
+	
+	'Lightmap stuff
+	Field doneLightmap:Bool
+	Field lightDist:Vec2f
+	Field lightMinUV:Vec2f
+	Field lightMaxUV:Vec2f
+	Field lightS:Float
+	Field lightT:Float
+	Field lightMapSize:Vec2i
+	Field lightMapPos:Vec2f
+	
+	Method MakeLightmap()
+		If Self.lightMap<0 Then Return
+		If lightMapSize.x<=0 Or lightMapSize.y<=0 Then Return
+		
+		parentBsp.header.lightMaps.JumpTo()
+		
+		'Start of a new lightmap
+		If Not parentBsp.lightMapPixmap Then
+			Local pixSize:Int=Pow2Size(Sqrt(parentBsp.header.lightMaps.size)*2)
+			parentBsp.lightMapPixmap=New Pixmap(pixSize,pixSize)
+			
+			'Next part start
+			parentBsp.lightMapStart=New Vec2i(LIGHT_PAD,LIGHT_PAD)
+		Endif
+		
+		'Will this part will be outside of the pixmap?
+		If parentBsp.lightMapStart.x+lightMapSize.x>=parentBsp.lightMapPixmap.Width Then
+			'Place it a row below
+			parentBsp.lightMapStart.x=LIGHT_PAD
+			parentBsp.lightMapStart.y+=parentBsp.lightMapMaxH
+			parentBsp.lightMapMaxH=0
+		Endif
+		
+		'Set this lightmap parts start
+		Self.lightMapPos.x=parentBsp.lightMapStart.x
+		Self.lightMapPos.y=parentBsp.lightMapStart.y
+		
+		Local x:Int
+		Local y:Int
+		Local cI:Int
+		Local color:UByte
+		Local pix:=parentBsp.lightMapPixmap
+		Local start:=parentBsp.lightMapStart
+		Local argb:UInt
+		
+		For y=start.y To start.y+lightMapSize.y
+		For x=start.x To start.x+lightMapSize.x
+			color=parentBsp.data.PeekByte(parentBsp.dataOffset+lightMap+cI)
+			argb=GenRGB(color, color, color)
+			
+			'Are we out of space?!
+			If y>=parentBsp.lightMapPixmap.Height Then Return
+				
+			pix.SetPixelARGB(x,y,argb)
+			
+			'Padding
+			If LIGHT_PAD Then
+				If x=start.x Then pix.SetPixelARGB(x-1,y,argb)
+				If x=start.x+lightMapSize.x-1 Then pix.SetPixelARGB(x+1,y,argb)
+				
+				If y=start.y Then pix.SetPixelARGB(x,y-1,argb)
+				If y=start.y+lightMapSize.y-1 Then pix.SetPixelARGB(x,y+1,argb)
+				
+				If x=start.x And y=start.y Then pix.SetPixelARGB(x-1,y-1,argb)
+				If x=start.x+lightMapSize.x-1 And y=start.y Then pix.SetPixelARGB(x+1,y-1,argb)
+				If x=start.x+lightMapSize.x-1 And y=start.y+lightMapSize.y-1 Then pix.SetPixelARGB(x+1,y+1,argb)
+				If x=start.x And y=start.y+lightMapSize.y-1 Then pix.SetPixelARGB(x-1,y+1,argb)
+			Endif
+			
+			cI+=1
+		Next
+		Next
+		
+		'Set next start position
+		parentBsp.lightMapStart.x+=lightMapSize.x+LIGHT_PAD*2
+		
+		'Was this part tallest?
+		If parentBsp.lightMapMaxH<Self.lightMapSize.y+LIGHT_PAD Then
+			parentBsp.lightMapMaxH=Self.lightMapSize.y+LIGHT_PAD
+		Endif
+	End
+	
+	Method CalcLightmapSize:Vec2i()
+		If Self.lightMap<0 Then Return New Vec2i
+		
+		If doneLightmap Then
+			'Return same if already calculated
+			Return lightMapSize
+		Else
+			'Being a new calculation!
+			lightMapSize=New Vec2i
+			doneLightmap=True
+		Endif
+		
+		'Get the vertex data from all edges
+		Local ledge:BspLedge
+		Local edge:BspEdge
+		Local vert:BspVertex
+		Local surface:BspSurface=parentBsp.surfaces[Abs(Self.texInfoID)]
+		
+		For Local eNr:Int=Self.ledgeID Until Self.ledgeID+Self.ledgeNum 'Go through edges
+			ledge=parentBsp.ledges[Abs(eNr)] 'Get ledge
+			edge=parentBsp.edges[Abs(ledge.edge)] 'Get edge via ledge
+			
+			If ledge.edge<0 Then
+				If edge.vertex0>=parentBsp.vertices.Length Then Return New Vec2i
+				vert=parentBsp.vertices[edge.vertex0]
+			Else
+				If edge.vertex1>=parentBsp.vertices.Length Then Return New Vec2i
+				vert=parentBsp.vertices[edge.vertex1]
+			Endif
+			
+			lightS=vert.Dot(surface.vectorS)+surface.distS
+			lightT=vert.Dot(surface.vectorT)+surface.distT
+			
+			If (eNr=Self.ledgeID) Then
+				'Starting point
+				lightMinUV.x=lightS
+				lightMinUV.y=lightT
+				lightMaxUV.x=lightS
+				lightMaxUV.y=lightT
+			Else
+				'Is this a new minimum?
+				If lightS<lightMinUV.x Then lightMinUV.x=lightS
+				If lightT<lightMinUV.y Then lightMinUV.y=lightT
+				
+				'Is this a new maximum
+				If lightS>lightMaxUV.x Then lightMaxUV.x=lightS
+				If lightT>lightMaxUV.y Then lightMaxUV.y=lightT
+			End If
+		Next
+		
+		'Get distances
+		lightDist.x=Ceil(lightMaxUV.x)-Floor(lightMinUV.x)
+		lightDist.y=Ceil(lightMaxUV.y)-Floor(lightMinUV.y)
+		
+		'Lightmap part size
+		lightMapSize.x=lightDist.x/16
+		lightMapSize.y=lightDist.y/16
+		
+		Return lightMapSize
+	End
+	
+	Method New(parent:Bsp)
+		Self.parentBsp=parent
+		
+		planeID=ReadUShort()
+		side=ReadUShort()
+		ledgeID=ReadInt()
+		ledgeNum=ReadShort()
+		texInfoID=ReadShort()
+		typeLight=ReadByte()
+		baseLight=ReadByte()
+		light[0]=ReadByte()
+		light[1]=ReadByte()
+		lightMap=ReadInt()
+	End
+	
+	Function Size:Int()
+		Return (2*4)+(4*2)+4
+	End
+End
+
 'Extend Mesh to support Bsp
 Class Mesh Extension
 	Function CreateFromBsp:Mesh(bsp:Bsp,id:Int=0)
@@ -1110,6 +1376,8 @@ Class Mesh Extension
 		
 		Local s:Double
 		Local t:Double
+		Local lightU:Double
+		Local lightV:Double
 		
 		Local triV:Int
 		
@@ -1144,9 +1412,21 @@ Class Mesh Extension
 				'Make vertex
 				Local v:=New Vertex3f(-vert.y, vert.z, vert.x, s, t)
 				
-				'Prepare UVs
+				'Prepare UV
 				s=vert.Dot(surface.vectorS)+surface.distS
 				t=vert.Dot(surface.vectorT)+surface.distT
+				
+				'Lightmap UV
+				If face.lightMap>=0 Then
+					lightU=(s-face.lightMinUV.x)/face.lightDist.x
+					lightV=(t-face.lightMinUV.y)/face.lightDist.y
+					
+					lightU=(face.lightMapPos.x + lightU * face.lightMapSize.x)/Double(bsp.lightMapPixmap.Width)
+					lightV=(face.lightMapPos.y + lightV * face.lightMapSize.y)/Double(bsp.lightMapPixmap.Height)
+					
+					v.texCoord1.x=lightU
+					v.texCoord1.y=lightV
+				EndIf
 				
 				'Texture UV
 				s/=bsp.mipTexs[surface.textureID].width
@@ -1222,6 +1502,7 @@ Class MyWindow Extends Window
 	Field testBallCol:Collider
 	Field testBallBody:RigidBody
 	Field testBox:Model
+	Field showInfo:Int=True
 	
 	Method New(title:String="Bsp Loader",width:Int=1280/1.5,height:Int=720/1.5,flags:WindowFlags=WindowFlags.Resizable)
 		Super.New(title,width,height,flags)
@@ -1269,9 +1550,19 @@ Class MyWindow Extends Window
 		'testBallBody=New RigidBody(1,testBallCol,testBall)
 		
 		'For Local m:=Eachin bsp.mipTexs
-		'	Cast<PbrMaterial>(m.material).ColorTexture=Texture.Load("asset::textures/test.png",bsp.textureFlags)
-		'	Cast<PbrMaterial>(m.material).ColorFactor=Color.White
+		'	Cast<PbrMaterial>(m.material).EmissiveTexture=Texture.Load("C:\Users\vital\Desktop\light.png",bsp.textureFlags)
+			'Cast<PbrMaterial>(m.material).ColorFactor=Color.White
 		'Next
+		
+		'DEBUG DISABLE TEXTUYRES
+		Local tmpM:QuakeMaterial
+		
+		For Local m:=Eachin bsp.mipTexs
+			If Not m.material Then Continue
+			tmpM=Cast<QuakeMaterial>(m.material)
+			If Not tmpM Then Continue
+			tmpM.EmissiveTexture=Texture.ColorTexture(Color.White)
+		Next
 	End
 	
 	Method OpenBsp(path:String)
@@ -1327,9 +1618,37 @@ Class MyWindow Extends Window
 		bsp.Update()
 		'World.GetDefault().Update()
 		'map.Rotate(.001,.002,.003)
-		canvas.DrawText("FPS: "+App.FPS,0,0)
-		canvas.DrawText("F8 Load Bsp",0,canvas.Font.Height)
-		canvas.DrawText("F5 Reload Shaders",0,canvas.Font.Height*2)
+		If showInfo Then 
+			canvas.DrawText("FPS: "+App.FPS,0,0)
+			canvas.DrawText("F8 Load Bsp",0,canvas.Font.Height)
+			canvas.DrawText("F5 Reload Shaders",0,canvas.Font.Height*2)
+			canvas.DrawText("F2 Disable Textures",0,canvas.Font.Height*3)
+			canvas.DrawText("F3 Enable Textures",0,canvas.Font.Height*4)
+		Endif
+		
+		If Keyboard.KeyHit(Key.F1) Then showInfo~=1
+		
+		If Keyboard.KeyHit(Key.F2) Then
+			Local tmpM:QuakeMaterial
+			
+			For Local m:=Eachin bsp.mipTexs
+				If Not m.material Then Continue
+				tmpM=Cast<QuakeMaterial>(m.material)
+				If Not tmpM Then Continue
+				tmpM.EmissiveTexture=Texture.ColorTexture(Color.White)
+			Next
+		Endif
+		
+		If Keyboard.KeyHit(Key.F3) Then
+			Local tmpM:QuakeMaterial
+			
+			For Local m:=Eachin bsp.mipTexs
+				If Not m.material Then Continue
+				tmpM=Cast<QuakeMaterial>(m.material)
+				If Not tmpM Then Continue
+				tmpM.EmissiveTexture=m.texture
+			Next
+		Endif
 		
 		If Keyboard.KeyHit(Key.F5) Then
 			canvas.Color=Color.Black
