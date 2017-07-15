@@ -20,6 +20,7 @@ Function Pow2Size:Int(n:Int)
 End
 
 Function GenRGB:UInt(r:Int,g:Int,b:Int,a:Int=255)
+	r=Min(r,255);g=Min(g,255);b=Min(b,255)
 	Return (a Shl 24) | (r Shl 16) | (g Shl 8) | b
 End
 
@@ -27,6 +28,13 @@ End
 
 Class Bsp Extends BspReader
 	Const SCALE:Float=0.075
+	
+	'Tint the lightmap
+	Field lightMultiR:Float=1
+	Field lightMultiG:Float=1
+	Field lightMultiB:Float=1
+	
+	Field useLightmap:Bool=True
 	
 	Field data:DataBuffer
 	Field dataOffset:UInt
@@ -157,29 +165,36 @@ Class Bsp Extends BspReader
 		Next
 		
 		'Read lightmaps
-		For i=0 Until Self.faces.Length 'Store lightmap parts in big picture
-			Self.faces[i].CalcLightmapSize()
-			Self.faces[i].MakeLightmap()
-		Next
-		Self.lightmapTexture=New Texture(Self.lightMapPixmap,TextureFlags.FilterMipmap)
-		
-		'lightMapPixmap.Save("C:\Users\vital\Desktop\light.png")
+		If useLightmap Then 
+			For i=0 Until Self.faces.Length 'Store lightmap parts in big picture
+				Self.faces[i].CalcLightmapSize()
+				Self.faces[i].MakeLightmap()
+			Next
+			If Self.lightMapPixmap Then
+				Self.lightmapTexture=New Texture(Self.lightMapPixmap,TextureFlags.Filter)
+				'lightMapPixmap.Save("C:\Users\vital\Desktop\light.png")
+			Else
+				useLightmap=False
+			Endif
+		Endif
 		
 		'Process mipmap headers
 		Self.header.mipTex.JumpTo()
 		Self.mipTexHeader=New BspMipHeader(Self)
 		num=Self.mipTexHeader.Count
-		Print "MipTexs: "+num
+		Print "MipTexs (header): "+num
 		
 		'Process miptexs from mipmap header
 		num=Self.mipTexHeader.Count
+		Local mipTexCount:Int
 		Self.mipTexs=New BspMipTex[num]
 		For i=0 Until num
 			Self.mipTexs[i]=New BspMipTex(Self,i)
-			Self.mipTexs[i].Generate()
+			If Self.mipTexs[i].Generate() Then mipTexCount+=1
 		Next
+		Print "MipTexs: "+mipTexCount
 		For i=0 Until num 'Find animations!
-			If Not Self.mipTexs[i] Then Continue
+			If Not Self.mipTexs[i] Or Not Self.mipTexs[i].texture Then Continue
 			Self.mipTexs[i].FindAnimation()
 		Next
 		
@@ -292,11 +307,11 @@ Class BspMipTex Extends BspReader
 		nextAnimation=Null
 	End
 	
-	Method Generate()
+	Method Generate:Pixmap()
 		JumpTo()
 		If width<=1 Or height<=1 Or width>1024*4 Or height>1024*4 Then
 			Print "Invalid texture size: "+width+"x"+height
-			Return
+			Return Null
 		Endif
 		
 		'Does this texture use a mask?
@@ -325,6 +340,26 @@ Class BspMipTex Extends BspReader
 		Next
 		Next
 		
+		'Sky padding
+		If name.StartsWith("sky") Then
+			'Get separate sky parts
+			Local lSky:=pix.Window(0,0,pix.Width/2,pix.Height)
+			Local lSkyPad:=pix.Window(0,0,1,pix.Height)
+			Local rSky:=pix.Window(pix.Width/2,0,pix.Width/2,pix.Height)
+			Local rSkyPad:=pix.Window(pix.Width-1,0,1,pix.Height)
+			
+			'New sky texture with padding
+			Local skyPix:=New Pixmap(pix.Width+2,pix.Height)
+			
+			'Paste padding parts
+			skyPix.Paste(lSkyPad,lSky.Width,0)
+			skyPix.Paste(rSkyPad,skyPix.Width-rSky.Width-1,0)
+			
+			'Paste sky parts into new pixmap
+			skyPix.Paste(lSky,0,0)
+			skyPix.Paste(rSky,skyPix.Width-rSky.Width,0)
+		Endif
+		
 		'Just add a normal texture
 		If Not texture Then texture=New Texture(pix,parentBsp.textureFlags)
 		
@@ -351,13 +386,17 @@ Class BspMipTex Extends BspReader
 			Local mat:=New QuakeMaterial(Color.Black,1,1)
 			mat.EmissiveTexture=texture
 			mat.EmissiveFactor=Color.White
-			mat.LightmapTexture=parentBsp.lightmapTexture
+			If parentBsp.lightmapTexture And parentBsp.useLightmap Then 
+				mat.LightmapTexture=parentBsp.lightmapTexture
+			Endif
 			mat.UseMask=masked
 			material=mat
 		Endif
 		
 		'Debug save
 		'pix.Save("C:\Users\vital\Desktop\output\"+name+".png")
+		
+		Return pix
 	End
 	
 	Method New(parent:Bsp,id:Int)
@@ -674,13 +713,14 @@ Class BspPlane Extends BspReader
 End
 
 Class BspEntity
+	Field parentBsp:Bsp
 	Field data:=New Map<String,String>
 	Field rawData:String
 	Field className:String
 	Field origin:Vec3<Int>
 	Field angle:Double
-	Field model:Int
-	Field parentBsp:Bsp
+	Field model:UInt
+	Field message:String
 	
 	Property Angle:Double()
 		Return angle
@@ -738,6 +778,8 @@ Class BspEntity
 							Else
 								model=Int(lastValue)
 							Endif
+						Case "message"
+							Self.message=lastValue
 					End
 					
 					'Add to data map
@@ -1178,8 +1220,8 @@ Class BspFace Extends BspReader
 	Field side:UShort
 	Field ledgeID:Int
 	
-	Field ledgeNum:Short
-	Field texInfoID:Short
+	Field ledgeNum:UShort
+	Field texInfoID:UShort
 	
 	Field typeLight:Byte
 	Field baseLight:Byte
@@ -1204,7 +1246,9 @@ Class BspFace Extends BspReader
 		
 		'Start of a new lightmap
 		If Not parentBsp.lightMapPixmap Then
+			'Atlas size
 			Local pixSize:Int=Pow2Size(Sqrt(parentBsp.header.lightMaps.size)*2)
+			
 			parentBsp.lightMapPixmap=New Pixmap(pixSize,pixSize)
 			
 			'Next part start
@@ -1231,13 +1275,19 @@ Class BspFace Extends BspReader
 		Local start:=parentBsp.lightMapStart
 		Local argb:UInt
 		
-		For y=start.y To start.y+lightMapSize.y
-		For x=start.x To start.x+lightMapSize.x
+		For y=start.y Until start.y+lightMapSize.y
+		For x=start.x Until start.x+lightMapSize.x
+			
+			If parentBsp.dataOffset+lightMap+cI>parentBsp.header.lightMaps.position+parentBsp.header.lightMaps.size Then
+				Print "OUTSIDE OF LIGHTMAP AREA!"
+				Return
+			Endif
+			
 			color=parentBsp.data.PeekByte(parentBsp.dataOffset+lightMap+cI)
-			argb=GenRGB(color, color, color)
+			argb=GenRGB(1+color*parentBsp.lightMultiR, 1+color*parentBsp.lightMultiG, 1+color*parentBsp.lightMultiB)
 			
 			'Are we out of space?!
-			If y>=parentBsp.lightMapPixmap.Height Then Return
+			If y>=pix.Height Then Return
 				
 			pix.SetPixelARGB(x,y,argb)
 			
@@ -1258,6 +1308,9 @@ Class BspFace Extends BspReader
 			cI+=1
 		Next
 		Next
+		
+		'pix.Save("C:\Users\vital\Desktop\light_part.png")
+		'App.Terminate()
 		
 		'Set next start position
 		parentBsp.lightMapStart.x+=lightMapSize.x+LIGHT_PAD*2
@@ -1284,10 +1337,10 @@ Class BspFace Extends BspReader
 		Local ledge:BspLedge
 		Local edge:BspEdge
 		Local vert:BspVertex
-		Local surface:BspSurface=parentBsp.surfaces[Abs(Self.texInfoID)]
+		Local surface:BspSurface=parentBsp.surfaces[Self.texInfoID]
 		
-		For Local eNr:Int=Self.ledgeID Until Self.ledgeID+Self.ledgeNum 'Go through edges
-			ledge=parentBsp.ledges[Abs(eNr)] 'Get ledge
+		For Local eNr:UInt=Self.ledgeID Until Self.ledgeID+Self.ledgeNum 'Go through edges
+			ledge=parentBsp.ledges[eNr] 'Get ledge
 			edge=parentBsp.edges[Abs(ledge.edge)] 'Get edge via ledge
 			
 			If ledge.edge<0 Then
@@ -1301,7 +1354,7 @@ Class BspFace Extends BspReader
 			lightS=vert.Dot(surface.vectorS)+surface.distS
 			lightT=vert.Dot(surface.vectorT)+surface.distT
 			
-			If (eNr=Self.ledgeID) Then
+			If eNr=Self.ledgeID Then
 				'Starting point
 				lightMinUV.x=lightS
 				lightMinUV.y=lightT
@@ -1323,8 +1376,8 @@ Class BspFace Extends BspReader
 		lightDist.y=Ceil(lightMaxUV.y)-Floor(lightMinUV.y)
 		
 		'Lightmap part size
-		lightMapSize.x=lightDist.x/16
-		lightMapSize.y=lightDist.y/16
+		lightMapSize.x=Round(lightDist.x/16.0)+1
+		lightMapSize.y=Round(lightDist.y/16.0)+1
 		
 		Return lightMapSize
 	End
@@ -1335,8 +1388,8 @@ Class BspFace Extends BspReader
 		planeID=ReadUShort()
 		side=ReadUShort()
 		ledgeID=ReadInt()
-		ledgeNum=ReadShort()
-		texInfoID=ReadShort()
+		ledgeNum=ReadUShort()
+		texInfoID=ReadUShort()
 		typeLight=ReadByte()
 		baseLight=ReadByte()
 		light[0]=ReadByte()
@@ -1366,7 +1419,7 @@ Class Mesh Extension
 		Local face:BspFace
 		Local faceNr:Int
 		Local edge:BspEdge
-		Local edgeNr:Int
+		Local edgeNr:UInt
 		Local ledge:BspLedge
 		Local plane:BspPlane
 		Local surface:BspSurface
@@ -1390,7 +1443,9 @@ Class Mesh Extension
 		For faceNr=model.faceID Until model.faceID+model.faceNum
 			'Print "Face: "+faceNr
 			face=bsp.faces[faceNr]
+			If face.planeID>=bsp.planes.Length Then Continue
 			plane=bsp.planes[face.planeID]
+			If face.texInfoID>=bsp.surfaces.Length Then Continue
 			surface=bsp.surfaces[face.texInfoID]
 			
 			'Reset new vertex counter
@@ -1399,6 +1454,10 @@ Class Mesh Extension
 			'Go through edges
 			For edgeNr=face.ledgeID Until face.ledgeID+face.ledgeNum
 				'Print "Edge: "+edgeNr
+				If edgeNr>=bsp.ledges.Length Then
+					Print "Model requested incorrect ledge number"
+					Return Null
+				Endif
 				ledge=bsp.ledges[edgeNr] 'Get ledge
 				edge=bsp.edges[Abs(ledge.edge)] 'Get edge via ledge
 				
@@ -1407,6 +1466,10 @@ Class Mesh Extension
 					vert=bsp.vertices[edge.vertex0]
 				Else
 					vert=bsp.vertices[edge.vertex1]
+				Endif
+				If Not vert Then
+					Print "Requested vert does not exist"
+					Return Null
 				Endif
 				
 				'Make vertex
@@ -1421,8 +1484,10 @@ Class Mesh Extension
 					lightU=(s-face.lightMinUV.x)/face.lightDist.x
 					lightV=(t-face.lightMinUV.y)/face.lightDist.y
 					
-					lightU=(face.lightMapPos.x + lightU * face.lightMapSize.x)/Double(bsp.lightMapPixmap.Width)
-					lightV=(face.lightMapPos.y + lightV * face.lightMapSize.y)/Double(bsp.lightMapPixmap.Height)
+					If bsp.lightMapPixmap Then 
+						lightU=(face.lightMapPos.x + lightU * face.lightMapSize.x)/Double(bsp.lightMapPixmap.Width)
+						lightV=(face.lightMapPos.y + lightV * face.lightMapSize.y)/Double(bsp.lightMapPixmap.Height)
+					Endif
 					
 					v.texCoord1.x=lightU
 					v.texCoord1.y=lightV
@@ -1438,11 +1503,15 @@ Class Mesh Extension
 				v.normal=plane.normal
 				
 				'Add vertex to mesh
-				mesh.AddVertex(v)
+				If Not mesh Then Return Null
+				If v.position.x<>v.position.y Or v.position.y<>v.position.z Or v.position.x<>v.position.z Then
+					mesh.AddVertex(v)
+					
+					'Count!
+					vertCount+=1
+					vertCountNew+=1
+				Endif
 				
-				'Count!
-				vertCount+=1
-				vertCountNew+=1
 			Next
 			
 			'Is this a new texture?
@@ -1498,6 +1567,7 @@ Class MyWindow Extends Window
 	Field bsp:Bsp
 	Field map:Model[]
 	Field fog:FogEffect
+	Field bloom:BloomEffect
 	Field testBall:Model
 	Field testBallCol:Collider
 	Field testBallBody:RigidBody
@@ -1518,7 +1588,7 @@ Class MyWindow Extends Window
 		
 		'create camera
 		camera=New Camera
-		camera.Near=0.1
+		camera.Near=1
 		camera.Far=2500
 		
 		'fog effect
@@ -1526,6 +1596,10 @@ Class MyWindow Extends Window
 		fog.Color=scene.ClearColor
 		fog.Near=camera.Far-500
 		fog.Far=camera.Far
+		
+		'bloom effect
+		'bloom=New BloomEffect
+		'bloom.Enabled=True
 		
 		'create light
 		light=New Light
@@ -1543,6 +1617,8 @@ Class MyWindow Extends Window
 		'Test physics
 		'Local collider:=New MeshCollider(map[0].Mesh)
 		'Local body:=New RigidBody(0,collider,map[0])
+		
+		
 		
 		'testBall=Model.CreateSphere(20,24,12,New PbrMaterial(Color.Yellow))
 		'testBall.Move(-500,200,500)
@@ -1593,6 +1669,11 @@ Class MyWindow Extends Window
 					camera.MoveY(2)
 					camera.SetRotation(0,e.Radians,0)
 				Endif
+				
+				If e.className="worldspawn" Then
+					Print e.rawData
+					Self.Title="BSP: "+e.message
+				End
 				
 				'Make entity models
 				If e.model And Not e.className.StartsWith("trigger_") Then
@@ -1685,36 +1766,84 @@ Function Main()
 End
 
 Function Fly(entity:Entity,view:View,speed:Float=0.25)
-	If Keyboard.KeyDown(Key.LeftShift) Or Keyboard.KeyDown(Key.RightShift) Then speed*=0.5
+	Global rotAcc:Vec2f
+	Global moveAcc:Vec3f
+	Global lastFov:Float
+	Local turnAccSpd:Float=0.075
+	Local turnSpd:Float=0.04
+	Local turn:Float
+	Local moveAccSpd:Float=0.06
+	Local move:Vec3f
+	Local tmpCam:Camera'=Cast<Camera>(entity)
 	
+	If Keyboard.KeyDown(Key.LeftShift) Or Keyboard.KeyDown(Key.RightShift) Then
+		speed*=0.5
+		turnSpd*=0.35
+		moveAccSpd*=0.35
+		turnAccSpd*=0.35
+		
+		
+		If tmpCam Then
+			tmpCam.Fov+=((lastFov*1.25)-tmpCam.Fov)*0.01
+		Endif
+	Else
+		If tmpCam Then
+			If lastFov Then
+				tmpCam.Fov+=(lastFov-tmpCam.Fov)*0.01
+			Else
+				lastFov=tmpCam.Fov
+			Endif
+		Endif
+	Endif
+	
+	'Turning
+	turn=0
 	If Keyboard.KeyDown(Key.Left)
-		entity.RotateY(.05,True)
+		turn=turnSpd
 	ElseIf Keyboard.KeyDown(Key.Right)
-		entity.RotateY(-.05,True)
+		turn=-turnSpd
 	Endif
+	rotAcc.y+=(turn-rotAcc.y)*turnAccSpd
+	entity.RotateY(rotAcc.y,True)
 	
+	turn=0
 	If Keyboard.KeyDown(Key.Up)
-		entity.RotateX(-.05)
+		turn=-turnSpd
 	ElseIf Keyboard.KeyDown(Key.Down)
-		entity.RotateX(.05)
+		turn=turnSpd
 	Endif
+	If Keyboard.KeyDown(Key.KeyEnd) Then turn=-entity.Rotation.x*turnAccSpd
+	rotAcc.x+=(turn-rotAcc.x)*turnAccSpd
+	entity.RotateX(rotAcc.x)
 	
+	'Moving
+	move.z=0
 	If Keyboard.KeyDown(Key.W)
-		entity.MoveZ(speed)
+		move.z=speed
 	ElseIf Keyboard.KeyDown(Key.S)
-		entity.MoveZ(-speed)
+		move.z=-speed
 	Endif
+	moveAcc.z+=(move.z-moveAcc.z)*moveAccSpd
 	
+	move.x=0
 	If Keyboard.KeyDown(Key.D)
-		entity.MoveX(speed)
+		move.x=speed
 	ElseIf Keyboard.KeyDown(Key.A)
-		entity.MoveX(-speed)
+		move.x=-speed
 	Endif
+	moveAcc.x+=(move.x-moveAcc.x)*moveAccSpd
 	
+	move.y=0
 	If Keyboard.KeyDown(Key.Space)
-		entity.MoveY(speed)
+		move.y=speed
 	ElseIf Keyboard.KeyDown(Key.LeftControl) Or Keyboard.KeyDown(Key.C)
-		entity.MoveY(-speed)
+		move.y=-speed
 	Endif
+	moveAcc.y+=(move.y-moveAcc.y)*moveAccSpd
 	
+	entity.Move(moveAcc.x,moveAcc.y,moveAcc.z)
 End
+
+'Function CalcAngleDiff:Float(an1:Float, an2:Float)
+'	Return ATan2(Sin(an1-an2), Cos(an1-an2))
+'End
